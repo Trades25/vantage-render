@@ -1921,4 +1921,78 @@ router.get("/:_id/withdrawals/history", async (req, res) => {
   }
 });
 
+// ── Admin profit adjustments ─────────────────────────────────────────
+// Used by the admin "Profit Manager" (POST) and the user's profit history
+// page (GET). Deductions never take profit below 0. The write only succeeds
+// if profit hasn't changed since we read it, so two admins adjusting the
+// same user at once can't overwrite each other; we retry a few times.
+router.post("/:_id/profit/adjust", requireAdmin, async function (req, res) {
+  const { _id } = req.params;
+  const { type, amount, note } = req.body;
+
+  if (!["add", "deduct"].includes(type)) {
+    return res.status(400).json({ success: false, message: "type must be 'add' or 'deduct'" });
+  }
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    return res.status(400).json({ success: false, message: "amount must be a positive number" });
+  }
+
+  try {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const user = await UsersDatabase.findById(_id).select("profit");
+      if (!user) {
+        return res.status(404).json({ success: false, message: "user not found" });
+      }
+
+      const stored = user.profit;
+      const before = Number(stored || 0);
+      const after = type === "add" ? before + amt : Math.max(0, before - amt);
+
+      const entry = {
+        _id: uuidv4(),
+        type,
+        amount: amt,
+        note: note || "",
+        before,
+        after,
+        admin: req.admin && req.admin.email,
+        date: new Date().toISOString(),
+      };
+
+      const updated = await UsersDatabase.findOneAndUpdate(
+        { _id, profit: stored === undefined ? null : stored },
+        { $set: { profit: after }, $push: { profitHistory: entry } },
+        { new: true }
+      );
+
+      if (updated) {
+        return res.status(200).json({ success: true, before, after, entry });
+      }
+      // profit changed between read and write — re-read and try again
+    }
+    return res.status(409).json({ success: false, message: "Profit is being updated elsewhere, try again" });
+  } catch (error) {
+    console.error("Profit adjust error:", error);
+    return res.status(500).json({ success: false, message: "Failed to adjust profit" });
+  }
+});
+
+router.get("/:_id/profit/history", async function (req, res) {
+  const { _id } = req.params;
+  try {
+    const user = await UsersDatabase.findById(_id).select("profit profitHistory");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "user not found" });
+    }
+    const data = (user.profitHistory || [])
+      .map(({ admin, ...rest }) => rest)
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+    return res.status(200).json({ success: true, currentProfit: Number(user.profit || 0), data });
+  } catch (error) {
+    console.error("Profit history error:", error);
+    return res.status(500).json({ success: false, message: "Failed to fetch profit history" });
+  }
+});
+
 module.exports = router;

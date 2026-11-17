@@ -86,6 +86,10 @@ kycRejectionReason: { type: String },
     type: Array,
     default: [],
   },
+  profitHistory: {
+    type: Array,
+    default: [],
+  },
   accounts: {
     type: Object,
   },
